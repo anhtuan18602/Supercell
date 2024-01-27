@@ -1,0 +1,325 @@
+---
+title: "supercell"
+output:
+  pdf_document: default
+  html_document: default
+date: "2023-11-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Imports
+```{r, message = FALSE, results='hide'}
+getwd()
+
+#install.packages("RSQLite")
+#install.packages("gridExtra")
+#install.packages("countrycode")
+#install.packages("rnaturalearth")
+#install.packages("rnaturalearthdata")
+library(RSQLite)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(countrycode)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+```
+
+## DAU analysis
+### Preprocessing
+```{r}
+
+db_file <- "sample.sqlite"
+
+# Connect to the SQLite database
+con <- dbConnect(SQLite(), dbname = db_file)
+
+
+# ------------------------DAILY ACTIVE USERS ANALYSIS---------------------------
+
+# Count the unique account id on each date and return a dataframe with 2 columns 
+# date and DAU
+dau_df <- dbGetQuery(con, "SELECT 
+                      COUNT(distinct account_id) AS dau, 
+                      DATE
+                      FROM account_date_session
+                      group by date
+                      Order by date;")
+
+# Create columns weekday and month for grouping dau_df
+dau_df <- dau_df %>%
+  mutate(
+    date = as.Date(date),
+    weekday = weekdays(date),
+    month = months(date))
+
+# Create a df for average monthly DAU, contains 12 averages for each month
+average_dau_df <- dau_df %>%
+  group_by(month) %>%
+  summarize(avg_dau= mean(dau), ) %>%
+  arrange(factor(month, levels = month.name))
+
+average_dau_df$changes <- c(0,diff(average_dau_df$avg_dau)) / 
+                          lag(average_dau_df$avg_dau) * 100 
+average_dau_df$changes[is.na(average_dau_df$changes)] <- 0
+# Count the number of unique ids in each month and returns a dataframe with 2 
+# columns
+# MAU: monthly active users
+# month: months in the year
+mau_df <- dbGetQuery(con, "SELECT 
+                      COUNT(distinct account_id) AS mau, 
+                      SUBSTR(date,1,7) as month
+                      FROM account_date_session
+                      group by month
+                      Order by month;")
+
+#Use the average_dau_df's month column as months for mau_df
+mau_df$month <- average_dau_df$month
+
+#Calculate DAU/MAU ratio as dm_ratio column in mau_df
+mau_df$dm_ratio <- average_dau_df$avg_dau / mau_df$mau
+
+#Rearrange the months for visualization
+mau_df <- mau_df %>% arrange(factor(month, levels = month.name))
+
+
+#Create a string vector of days in the week
+custom_weekday_order <- c("Monday", "Tuesday", "Wednesday", "Thursday", 
+                          "Friday", "Saturday", "Sunday")
+
+#Create a df where each row is a weekday with columns:
+# avg_dau: average DAU on a weekday throughout the year
+# weekday: day in the week
+weekday_dau_df <- dau_df %>%
+  group_by(weekday) %>%
+  summarize(avg_dau= mean(dau), ) %>%
+  arrange(factor(weekday, levels = custom_weekday_order))
+
+weekday_dau_summer <- 
+  dau_df[dau_df$month %in% c("June", "July", "August"), ] %>%
+  group_by(weekday) %>%
+  summarize(avg_dau= mean(dau), ) %>%
+  arrange(factor(weekday, levels = custom_weekday_order))
+```
+
+### Plots
+```{r, fig.show='hide'}
+#Plotting the DAU
+ggplot(dau_df, aes(x = date, y = dau)) +
+  geom_line(stat = "identity") +
+  labs(x = "day", y = "DAU") + 
+  ggtitle("DAU 2016")
+
+#Plotting monthly average DAU
+ggplot(average_dau_df, aes(x = factor(month, levels = month.name), 
+                           y = avg_dau)) +
+  geom_bar(stat = "identity", fill = "darkred") +
+  labs(x = "Month", y = "DAU") + 
+  ggtitle("Monthly DAU Average 2016")
+
+
+#Plotting DAU trendline for each month to explore seasonality
+layout(matrix(1:12, nrow = 3, byrow = TRUE))
+for (m in average_dau_df$month) {
+  dt <- dau_df %>%
+    filter(month == m)
+  plot(dt$date,dt$dau, type = "l",xlab = "date",ylab="dau")
+}
+layout(matrix(1, 1))
+
+#Plotting weekday average DAU
+ggplot(weekday_dau_df, aes(x = factor(weekday, levels = custom_weekday_order), 
+                           y = avg_dau)) +
+  geom_bar(stat = "identity", fill = "darkgreen") +
+  labs(x = "day", y = "DAU") + 
+  ggtitle("average DAU by weekdays")
+
+ggplot(weekday_dau_summer, 
+       aes(x = factor(weekday, levels = custom_weekday_order), 
+                           y = avg_dau)) +
+  geom_bar(stat = "identity", fill = "darkgreen") +
+  labs(x = "day", y = "DAU") + 
+  ggtitle("average DAU by weekdays in summer")
+
+var(weekday_dau_df$avg_dau)
+var(weekday_dau_summer$avg_dau)
+#Plotting MAU
+ggplot(mau_df, aes(x = factor(month, levels = month.name), y = mau)) +
+  geom_bar(stat = "identity", fill = "darkblue") +
+  labs(x = "Month", y = "MAU") + 
+  ggtitle("MAU 2016")
+
+#Plotting DAU/MAU ratio
+ggplot(mau_df, aes(x = factor(month, levels = month.name), y = dm_ratio)) +
+  geom_bar(stat = "identity", fill = "darkorange") +
+  labs(x = "Month", y = "DAU/MAU") + 
+  ggtitle("DAU/MAU ratio 2016 ")
+
+
+```
+
+
+## Sales analysis
+### Preprocessing
+```{r}
+# ------------------------------SALES ANALYSIS----------------------------------
+
+# Query and preprocessing
+
+region_users_count <- dbGetQuery(con, "SELECT 
+                  COUNT(account_id) as user_counts, country_code 
+                  FROM account 
+                  GROUP by country_code 
+                  ORDER by user_counts desc;")
+region_revenue <- dbGetQuery(con, "SELECT 
+                                  Sum(ip.iap_price_usd_cents) as revenue, 
+                                      a.country_code
+                                  FROM iap_purchase ip JOIN account a
+                                  ON ip.account_id = a.account_id 
+                                  GROUP BY a.country_code 
+                                  ORDER BY revenue DESC;")
+
+users_revenue_df <- merge(region_revenue, region_users_count, 
+                      by.x = "country_code", by.y = "country_code", all = TRUE)
+revenue_na_indices <- which(is.na(users_revenue_df[["revenue"]]))
+users_revenue_df[revenue_na_indices,"revenue"] <- 0
+users_revenue_df <- users_revenue_df %>%
+  mutate(country = countrycode(country_code, "iso2c", "country.name"))
+
+row_to_fix <- which(users_revenue_df[["country_code"]]=="XK")
+users_revenue_df[row_to_fix,"country"] = "Kosovo"
+
+rows_with_null <- which(is.na(users_revenue_df[["country_code"]]))
+users_revenue_df[rows_with_null,"country"] = "Unknown"
+users_revenue_df[rows_with_null,"country_code"] = "NA"
+
+# Convert from 1 cents unit to 1 USD
+users_revenue_df[["revenue"]] <- users_revenue_df[["revenue"]] / 100
+
+
+
+#Calculate ARPU
+users_revenue_df$avg_revenue <- users_revenue_df$revenue / 
+                                users_revenue_df$user_counts
+
+# Calculate average ARPU and standard deviation
+mean(users_revenue_df$avg_revenue)
+sd(users_revenue_df$avg_revenue)
+
+#Calculate revenue rate
+users_revenue_df$revenue_rate <- (users_revenue_df$revenue + 0.01) / 
+                                      users_revenue_df$user_counts
+
+
+world_map <- ne_countries(scale = "small", returnclass = "sf")
+world_map$iso_a2[world_map$iso_a2 == -99] <- NA
+world_map$iso_a2_eh[world_map$iso_a2_eh == -99] <- NA
+
+world_map$country_code <- coalesce(world_map$iso_a2_eh, world_map$iso_a2)
+world_map$country_code[world_map$name == "N. Cyprus"] <- "CY"
+world_map_data <- merge(world_map, users_revenue_df, 
+                    by.x = "country_code", by.y = "country_code", all.x = TRUE)
+
+world_map_data <- world_map_data[world_map_data$name != "Antarctica", ]
+#Use log scale for better color division in the map plots
+world_map_data$log_user_counts <- log(world_map_data$user_counts)
+world_map_data$log_revenue <- log(world_map_data$revenue)
+
+```
+### Plots
+```{r, fig.show='hide'}
+# Plotting
+# Users count
+
+#Map plot of user count
+ggplot() +
+  geom_sf(data = world_map_data, aes(fill = log_user_counts), color = "black") +
+  scale_fill_gradient(low = "beige", high = "darkred", na.value = "lightgray",
+                      name = "Log(User count)") +
+  theme_void() +
+  theme(
+    aspect.ratio = 0.6,
+    plot.margin = margin(0, 5, 0, 0)
+  )
+
+#Bar plot of top 20 by user count
+ggplot(head(users_revenue_df[order(users_revenue_df$user_counts, 
+                                   decreasing = TRUE),],20), 
+       aes(x = reorder(country,- user_counts), y = user_counts )) +
+  geom_bar(stat = "identity") +
+  labs(title = "Top 20 countries by user count",
+       x = "Country",
+       y = "Users count") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+
+# Revenue
+
+#Map plot
+ggplot() +
+  geom_sf(data = world_map_data, aes(fill = log_revenue), color = "black") +
+  scale_fill_gradient(low = "beige", high = "darkred", na.value = "lightgray",
+                      name = "Log(Revenue (USD)) ")+
+  theme_void() +
+  theme(
+    aspect.ratio = 0.6,
+    plot.margin = margin(0, 5, 0, 0)
+  )
+
+#Bar plot of top 20 by revenue 
+ggplot(head(users_revenue_df[order(users_revenue_df$revenue, 
+                                   decreasing = TRUE),],20), 
+       aes(x = reorder(country,- revenue), y = revenue )) +
+  geom_bar(stat = "identity") +
+  labs(title = "Top 20 countries by revenue",
+       x = "Country",
+       y = "Revenue (USD)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+
+
+
+# Average revenue per user per market
+
+#Map plot of ARPU
+world_map_data$log_avg_revenue <- log(world_map_data$avg_revenue)
+ggplot() +
+  geom_sf(data = world_map_data, aes(fill = log_avg_revenue), color = "black") +
+  scale_fill_gradient(low = "beige", high = "darkred", na.value = "lightgray",
+                      name = "Log(ARPU (USD)) ")+
+  theme_void()+
+  theme(
+    aspect.ratio = 0.6,
+    plot.margin = margin(0, 5, 0, 0)
+  )
+
+#Bar plot of top 20 by ARPU
+ggplot(head(users_revenue_df[order(users_revenue_df$avg_revenue, 
+                                   decreasing = TRUE),],20), 
+       aes(x = reorder(country,- avg_revenue), y = avg_revenue )) +
+  geom_bar(stat = "identity") +
+  labs(title = "Top 20 countries by ARPU",
+       x = "Country",
+       y = "Average Revenue per User (USD)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+#Bar plot of top 20 lowest revenue rate
+ggplot(head(users_revenue_df[order(users_revenue_df$revenue_rate),],20), 
+       aes(x = reorder(country,revenue_rate), y = revenue_rate)) +
+  geom_bar(stat = "identity") +
+  labs(title = "20 Countries with lowest Revenue Rate",
+       x = "Country",
+       y = "Revenue Rate (USD)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+
+```
+
+
